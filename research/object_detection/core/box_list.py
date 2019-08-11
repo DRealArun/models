@@ -108,6 +108,14 @@ class BoxList(object):
     """
     return self.get_field('boxes')
 
+  def num_masks_static(self):
+    """Returns number of boxes held in collection.
+
+    Returns:
+      a tensor representing the number of boxes held in the collection.
+    """
+    return self.data['masks'].get_shape()[0].value #Changed xc from masks
+
   def set(self, boxes):
     """Convenience function for setting box coordinates.
 

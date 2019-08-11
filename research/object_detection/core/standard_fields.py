@@ -161,6 +161,13 @@ class BoxListFields(object):
   keypoints = 'keypoints'
   keypoint_heatmaps = 'keypoint_heatmaps'
   is_crowd = 'is_crowd'
+  center_x = 'xc'
+  center_y = 'yc'
+  ymax = 'ymax'
+  xmax = 'xmax'
+  o1 = 'o1'
+  o2 = 'o2'
+  o3 = 'o3'
 
 
 class TfExampleFields(object):

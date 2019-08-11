@@ -1,0 +1,20 @@
+syntax = "proto2";
+
+package object_detection.protos;
+
+// Configuration proto for CenterOffsetBoxCoder. See
+// box_coders/center_offset_box_coder.py for details.
+message CenterOffsetBoxCoder {
+  // Scale factor for anchor encoded box center.
+  optional float y_scale = 1 [default = 10.0];
+  optional float x_scale = 2 [default = 10.0];
+
+  // Scale factor for anchor encoded box height.
+  optional float ymax_scale = 3 [default = 10.0];
+
+  // Scale factor for anchor encoded box width.
+  optional float xmax_scale = 4 [default = 10.0];
+  optional float o1_scale = 5 [default = 5.0];
+  optional float o2_scale = 6 [default = 5.0];
+  optional float o3_scale = 7 [default = 5.0];
+}

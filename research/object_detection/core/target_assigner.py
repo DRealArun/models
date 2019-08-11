@@ -43,6 +43,8 @@ from object_detection.core import standard_fields as fields
 from object_detection.matchers import argmax_matcher
 from object_detection.matchers import bipartite_matcher
 from object_detection.utils import shape_utils
+import numpy as np
+import math
 
 
 class TargetAssigner(object):
@@ -89,7 +91,9 @@ class TargetAssigner(object):
              groundtruth_boxes,
              groundtruth_labels=None,
              unmatched_class_label=None,
-             groundtruth_weights=None):
+             groundtruth_weights=None,
+             batch_cropped_gt_mask=None,
+             unmatched_mask_label=None):
     """Assign classification and regression targets to each anchor.
 
     For a given set of anchors and groundtruth detections, match anchors
@@ -158,9 +162,17 @@ class TargetAssigner(object):
     unmatched_shape_assert = shape_utils.assert_shape_equal(
         shape_utils.combined_static_and_dynamic_shape(groundtruth_labels)[1:],
         shape_utils.combined_static_and_dynamic_shape(unmatched_class_label))
+    unmatched_shape_assert_mask = shape_utils.assert_shape_equal(
+        shape_utils.combined_static_and_dynamic_shape(batch_cropped_gt_mask)[1:],
+        shape_utils.combined_static_and_dynamic_shape(unmatched_mask_label))
     labels_and_box_shapes_assert = shape_utils.assert_shape_equal(
         shape_utils.combined_static_and_dynamic_shape(
             groundtruth_labels)[:1],
+        shape_utils.combined_static_and_dynamic_shape(
+            groundtruth_boxes.get())[:1])
+    labels_and_box_shapes_assert_mask = shape_utils.assert_shape_equal(
+        shape_utils.combined_static_and_dynamic_shape(
+            batch_cropped_gt_mask)[:1],
         shape_utils.combined_static_and_dynamic_shape(
             groundtruth_boxes.get())[:1])
 
@@ -173,16 +185,17 @@ class TargetAssigner(object):
     # set scores on the gt boxes
     scores = 1 - groundtruth_labels[:, 0]
     groundtruth_boxes.add_field(fields.BoxListFields.scores, scores)
+    groundtruth_boxes.add_field(fields.BoxListFields.masks, batch_cropped_gt_mask)
 
     with tf.control_dependencies(
-        [unmatched_shape_assert, labels_and_box_shapes_assert]):
+        [unmatched_shape_assert, labels_and_box_shapes_assert, unmatched_shape_assert_mask, labels_and_box_shapes_assert_mask]):
       match_quality_matrix = self._similarity_calc.compare(groundtruth_boxes,
                                                            anchors)
       match = self._matcher.match(match_quality_matrix,
                                   valid_rows=tf.greater(groundtruth_weights, 0))
       reg_targets = self._create_regression_targets(anchors,
                                                     groundtruth_boxes,
-                                                    match)
+                                                    match, unmatched_mask_label)
       cls_targets = self._create_classification_targets(groundtruth_labels,
                                                         unmatched_class_label,
                                                         match)
@@ -226,7 +239,7 @@ class TargetAssigner(object):
     target.set_shape(target_shape)
     return target
 
-  def _create_regression_targets(self, anchors, groundtruth_boxes, match):
+  def _create_regression_targets(self, anchors, groundtruth_boxes, match, unmatched_mask_label):
     """Returns a regression target for each anchor.
 
     Args:
@@ -251,6 +264,183 @@ class TargetAssigner(object):
           ignored_value=tf.zeros(groundtruth_keypoints.get_shape()[1:]))
       matched_gt_boxlist.add_field(fields.BoxListFields.keypoints,
                                    matched_keypoints)
+
+    def process_masks(m):
+      y = tf.constant([0], dtype=tf.float32)
+      m = tf.cast(m, tf.float32)
+      cols = tf.where(tf.not_equal(m, y))
+      v = tf.where(tf.not_equal(m[0], y))
+      num_elems = tf.shape(m)
+      num_elems = tf.shape(m)
+      height = tf.cast(num_elems[1], tf.float32)
+      width = tf.cast(num_elems[2], tf.float32)
+      def mask_vectorize(indexes, cls, num_points, i, mask):
+          rss = tf.gather(cls[:,1], indexes[0,:]) #y_values
+          # rss = tf.Print(rss, [rss], "y_values")
+          css = tf.gather(cls[:,2], indexes[0,:]) #x_values
+          # css = tf.Print(css, [css], "x_values")
+          zero_tensor= tf.constant([0], dtype=tf.int32)
+          check1 = num_elems[0] > 0
+          assert_op1 = tf.Assert(check1, [check1])
+          with tf.control_dependencies([assert_op1]):
+              points = []
+              points2 = []
+              angle = 360/num_points
+              slope = math.tan(angle*np.pi/180)
+              ymin = tf.cast(tf.reduce_min(rss), tf.float32)
+              # ymin = tf.Print(ymin, [ymin], "ymin")
+              xmin = tf.cast(tf.reduce_min(css), tf.float32)
+              # xmin = tf.Print(xmin, [xmin], "xmin")
+              ymax = tf.cast(tf.reduce_max(rss), tf.float32)
+              # ymax = tf.Print(ymax, [ymax], "ymax")
+              xmax = tf.cast(tf.reduce_max(css), tf.float32)
+              # xmax = tf.Print(xmax, [xmax], "xmax")
+
+              xc = tf.cast(tf.round((xmax-xmin)/2), tf.float32)
+              yc = tf.cast(tf.round((ymax-ymin)/2), tf.float32)
+              center = [(xmin+xc)/width, (ymin+yc)/height]
+              points2.append(center)
+              points2 = tf.stack(points2)
+
+              xmax = tf.cast(xmax, tf.float32)/width
+              ymax = tf.cast(ymax, tf.float32)/height
+              xmin = tf.cast(xmin, tf.float32)/width
+              ymin = tf.cast(ymin, tf.float32)/height
+              
+              points.extend([(xmin, ymin), (xmin, ymax), (xmax, ymax), (xmax, ymin)])
+              # points = tf.Print(points, [points], "Points")
+
+              multiply2 = tf.shape(points)
+              # multiply2 = tf.Print(multiply2, [multiply2], "multiply2")
+              matrix = tf.tile(points2, [multiply2[0],1])
+              # matrix = tf.Print(matrix, [matrix], "matrix")
+              difference = points-matrix
+              # difference = tf.Print(difference, [difference], "Difference", summarize=4)
+              diff = tf.norm(tf.cast(difference, tf.float32), ord='euclidean', axis=1)
+              # diff = tf.Print(diff, [diff], "Initial diff", summarize=4)
+  #             points.insert(0, center)
+              center = tf.cast(center, tf.float32)
+              diff = tf.concat([[center[0]], diff], axis=0)# CHECK THESE PLEASE
+              diff = tf.concat([[center[1]], diff], axis=0)# CHECK THESE PLEASE
+              diff = tf.concat([[xmax], diff], axis=0)# CHECK THESE PLEASE
+              diff = tf.concat([[ymax], diff], axis=0)# CHECK THESE PLEASE
+              #             print_op = tf.Print(diff, [diff])
+              points = tf.stack(points)
+              diff = tf.stack(diff)
+              diff = tf.reshape(diff, (1, tf.shape(diff)[0],1))
+              # diff = tf.Print(diff, [diff], "Final diff", summarize=6)
+
+              return [diff], mask
+
+      # Changing because some masks are zero's and we need to run across all the
+      # Masks (matched or unmatched)
+      def condition(i, masks, indices, vectorized_masks, mask_db):
+          shape_temp = tf.shape(mask_db)
+          return tf.less(i, shape_temp[0])
+                
+      def body(i, masks, indices, vectorized_masks, mask_db):
+          vals, _ = tf.unique(masks[:,0])
+          value = tf.cast(tf.where(tf.equal(tf.cast(masks[:,0], tf.int32), i)), tf.int32)
+          value = tf.reshape(value, (1,-1))
+          def non_zero_mask_vectorization():
+              mask = mask_db[i]
+              vectorized_mask1, _ = mask_vectorize(value, masks, 4, i, mask)
+              return vectorized_mask1
+          def zero_mask_vectorization():
+              vectorized_mask1 = tf.zeros([1,8,1], dtype=tf.float32)
+              return vectorized_mask1
+
+          i_reshaped = tf.reshape(i, [1])
+          vals = tf.cast(vals, tf.int32)
+          a = tf.setdiff1d(vals, i_reshaped)
+          b = tf.setdiff1d(vals,a[0])
+          check_val = tf.size(b)
+          vectorized_mask = tf.cond(tf.equal(check_val, 0), zero_mask_vectorization, non_zero_mask_vectorization)
+          shapex = tf.shape(vectorized_mask)
+          check = tf.equal(shapex[0], 1)
+          assert_op = tf.Assert(check, [vectorized_mask])
+          with tf.control_dependencies([assert_op]):
+              vectorized_masks = tf.concat([vectorized_masks, vectorized_mask], 0)
+          return [tf.add(i, 1), masks, value, vectorized_masks, mask_db]
+
+      i = tf.constant(0, dtype=tf.int32)
+      indices = tf.zeros([1,0], dtype=tf.int32)
+      non_zero_x = tf.zeros([1,0], dtype=tf.int32)
+      shape2 = tf.constant([0], dtype=tf.int32)
+      shape3 = tf.constant([0], dtype=tf.int32)
+      vectorized_masks = tf.zeros([0,8,1], dtype=tf.float32)
+      i, _, indices, vectorized_masks, m = tf.while_loop(condition,body,[i, cols, indices, vectorized_masks, m], shape_invariants=[i.get_shape(), cols.get_shape(), tf.TensorShape([1, None]), tf.TensorShape([None, 8, 1]), m.get_shape()])
+      return indices, vectorized_masks, i, _
+
+    if groundtruth_boxes.has_field(fields.BoxListFields.masks):
+      masks = groundtruth_boxes.get_field(
+          fields.BoxListFields.masks)
+      indices, vectorized_masks, i, _ = process_masks(masks)
+      ycenter = vectorized_masks[:,2,0]
+      xcenter = vectorized_masks[:,3,0]
+      ymax = vectorized_masks[:,0,0]
+      xmax = vectorized_masks[:,1,0]
+      o1 = vectorized_masks[:,4,0]
+      o2 = vectorized_masks[:,5,0]
+      o3 = vectorized_masks[:,7,0]
+
+    # if groundtruth_boxes.has_field(fields.BoxListFields.center_x):
+      x = xcenter
+      general_unmatched_value = tf.zeros(x.get_shape()[1:])
+      matched_x = match.gather_based_on_match(
+        x,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.center_x,
+                                   matched_x)
+
+    # if groundtruth_boxes.has_field(fields.BoxListFields.center_y):
+      y = ycenter
+      matched_y = match.gather_based_on_match(
+        y,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      # matched_y = y
+      matched_gt_boxlist.add_field(fields.BoxListFields.center_y,
+                                   matched_y)
+
+    # if groundtruth_boxes.has_field(fields.BoxListFields.height):
+      matched_ymax = match.gather_based_on_match(
+        ymax,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.ymax,
+                                   matched_ymax)
+
+    # if groundtruth_boxes.has_field(fields.BoxListFields.width):
+      matched_xmax = match.gather_based_on_match(
+        xmax,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.xmax,
+                                   matched_xmax)
+
+      matched_o1 = match.gather_based_on_match(
+        o1,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o1,
+                                   matched_o1)
+
+      matched_o2 = match.gather_based_on_match(
+        o2,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o2,
+                                   matched_o2)
+
+      matched_o3 = match.gather_based_on_match(
+        o3,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o3,
+                                   matched_o3)
+
     matched_reg_targets = self._box_coder.encode(matched_gt_boxlist, anchors)
     match_results_shape = shape_utils.combined_static_and_dynamic_shape(
         match.match_results)
@@ -426,7 +616,9 @@ def batch_assign(target_assigner,
                  gt_box_batch,
                  gt_class_targets_batch,
                  unmatched_class_label=None,
-                 gt_weights_batch=None):
+                 gt_weights_batch=None,
+                 batch_cropped_gt_mask=None,
+                 unmatched_mask_label=None):
   """Batched assignment of classification and regression targets.
 
   Args:
@@ -486,11 +678,11 @@ def batch_assign(target_assigner,
   match_list = []
   if gt_weights_batch is None:
     gt_weights_batch = [None] * len(gt_class_targets_batch)
-  for anchors, gt_boxes, gt_class_targets, gt_weights in zip(
-      anchors_batch, gt_box_batch, gt_class_targets_batch, gt_weights_batch):
+  for anchors, gt_boxes, gt_class_targets, gt_weights, gt_masks in zip(
+      anchors_batch, gt_box_batch, gt_class_targets_batch, gt_weights_batch, batch_cropped_gt_mask):
     (cls_targets, cls_weights,
      reg_targets, reg_weights, match) = target_assigner.assign(
-         anchors, gt_boxes, gt_class_targets, unmatched_class_label, gt_weights)
+         anchors, gt_boxes, gt_class_targets, unmatched_class_label, gt_weights, gt_masks, unmatched_mask_label)
     cls_targets_list.append(cls_targets)
     cls_weights_list.append(cls_weights)
     reg_targets_list.append(reg_targets)
