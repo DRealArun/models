@@ -171,7 +171,7 @@ class CenterOffsetBoxCoder(box_coder.BoxCoder):
     ymax = tymax * ha + ymax_a
     xmax = txmax * wa + xmax_a
 
-    angle = tf.atan(tf.abs(ymax-ycenter)/tf.abs(xmax-xcenter))*180/3.142
+    angle = tf.atan(tf.abs(ymax-ycenter)/tf.abs(xmax-xcenter))
     cos_theta = tf.cos(angle)
     sin_theta = tf.sin(angle)
     pt1 = (xcenter-(o1*cos_theta), ycenter-(o1*sin_theta))

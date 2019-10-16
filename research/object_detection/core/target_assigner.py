@@ -318,7 +318,7 @@ class TargetAssigner(object):
               # difference = tf.Print(difference, [difference], "Difference", summarize=4)
               diff = tf.norm(tf.cast(difference, tf.float32), ord='euclidean', axis=1)
               # diff = tf.Print(diff, [diff], "Initial diff", summarize=4)
-  #             points.insert(0, center)
+   #            points.insert(0, center)
               center = tf.cast(center, tf.float32)
               diff = tf.concat([[center[0]], diff], axis=0)# CHECK THESE PLEASE
               diff = tf.concat([[center[1]], diff], axis=0)# CHECK THESE PLEASE
@@ -329,7 +329,6 @@ class TargetAssigner(object):
               diff = tf.stack(diff)
               diff = tf.reshape(diff, (1, tf.shape(diff)[0],1))
               # diff = tf.Print(diff, [diff], "Final diff", summarize=6)
-
               return [diff], mask
 
       # Changing because some masks are zero's and we need to run across all the
@@ -362,7 +361,6 @@ class TargetAssigner(object):
           with tf.control_dependencies([assert_op]):
               vectorized_masks = tf.concat([vectorized_masks, vectorized_mask], 0)
           return [tf.add(i, 1), masks, value, vectorized_masks, mask_db]
-
       i = tf.constant(0, dtype=tf.int32)
       indices = tf.zeros([1,0], dtype=tf.int32)
       non_zero_x = tf.zeros([1,0], dtype=tf.int32)
@@ -372,19 +370,234 @@ class TargetAssigner(object):
       i, _, indices, vectorized_masks, m = tf.while_loop(condition,body,[i, cols, indices, vectorized_masks, m], shape_invariants=[i.get_shape(), cols.get_shape(), tf.TensorShape([1, None]), tf.TensorShape([None, 8, 1]), m.get_shape()])
       return indices, vectorized_masks, i, _
 
+    def process_masks_full(m):
+      y = tf.constant([0], dtype=tf.float32)
+      m = tf.cast(m, tf.float32)
+      cols = tf.where(tf.not_equal(m, y))
+      v = tf.where(tf.not_equal(m[0], y))
+      num_elems = tf.shape(m)
+      # num_elems = tf.Print(num_elems, [num_elems], "Number of elements")
+      height = tf.cast(num_elems[1], tf.float32)
+      width = tf.cast(num_elems[2], tf.float32)
+      def mask_vectorize(indexes, cls, num_points, i, mask):
+          rss = tf.gather(cls[:,1], indexes[0,:]) #y_values
+          css = tf.gather(cls[:,2], indexes[0,:]) #x_values
+          zero_tensor= tf.constant([0], dtype=tf.int32)
+          check1 = num_elems[0] > 0
+          assert_op1 = tf.Assert(check1, [check1])
+          with tf.control_dependencies([assert_op1]):
+              points = []
+              points2 = []
+              angle = 360/num_points
+              slope = math.tan(angle*np.pi/180)
+              ymin = tf.cast(tf.reduce_min(rss), tf.int32)
+              xmin = tf.cast(tf.reduce_min(css), tf.int32)
+              ymax = tf.cast(tf.reduce_max(rss), tf.int32)
+              xmax = tf.cast(tf.reduce_max(css), tf.int32)
+
+              xc = tf.cast(tf.round((xmax-xmin)/2), tf.int32)
+              yc = tf.cast(tf.round((ymax-ymin)/2), tf.int32)
+              center = [xmin+xc, ymin+yc]
+
+              # we use the reduced_css only when the calculated center xmin+xc lies outside the mask. 
+              # Hence it will not be present in the reduced_css list and hence the difference will never be zero.
+              reduced_css = tf.cast(css, tf.int32) 
+              reduced_rss = tf.cast(rss, tf.int32)
+              diff_list_x = tf.abs(reduced_css - (xmin+xc))
+              diff_list_y = tf.abs(reduced_rss - (ymin+yc))
+              sum_diff_list = diff_list_x + diff_list_y
+              
+              pixel = tf.gather_nd(mask, (center[1],center[0]))
+              def true_fn_1():
+                  min_id = tf.argmin(sum_diff_list)
+                  new_x = tf.gather(reduced_css, min_id)
+                  new_y = tf.gather(reduced_rss, min_id)
+                  return new_x, new_y
+              
+              def false_fn_1():
+                  return xmin+xc, ymin+yc
+                  
+              center[0], center[1] = tf.cond(tf.equal(pixel, 0), true_fn_1, false_fn_1)
+              unique_values, _ = tf.unique(tf.cast(css, tf.int32))
+              multiply = tf.shape(unique_values)
+              matrix = tf.reshape(tf.tile([center[1]], multiply), [multiply[0], 1])
+              matrix2 = tf.reshape(unique_values, [multiply[0], 1])
+              matrix3 = tf.squeeze(tf.stack([matrix,matrix2], axis=2))
+              one_value = tf.constant([1], dtype=tf.int32)
+              non_zero_x = tf.cast(tf.where(tf.equal(tf.cast(tf.gather_nd(mask, matrix3), tf.int32), one_value)), tf.int32)
+              non_zero_x = tf.reshape(non_zero_x, (-1,))
+              non_zero_x = tf.gather(unique_values, non_zero_x)
+              
+              unique_values2, _ = tf.unique(tf.cast(rss, tf.int32))
+              multiply2 = tf.shape(unique_values2)
+              matrix = tf.reshape(tf.tile([center[0]], multiply2), [multiply2[0], 1])
+              matrix2 = tf.reshape(unique_values2, [multiply2[0], 1])
+              matrix3 = tf.squeeze(tf.stack([matrix2,matrix], axis=2))
+              one_value = tf.constant([1], dtype=tf.int32)
+              non_zero_y = tf.cast(tf.where(tf.equal(tf.cast(tf.gather_nd(mask, matrix3), tf.int32), one_value)), tf.int32)
+              non_zero_y = tf.reshape(non_zero_y, (-1,))
+              non_zero_y = tf.gather(unique_values2, non_zero_y)
+                
+              points2.append([tf.cast(center[0], tf.float32)/width, tf.cast(center[1], tf.float32)/height])
+              points2 = tf.stack(points2)
+              
+              min_x = tf.where(tf.not_equal(tf.shape(non_zero_x)[0], 0), tf.reduce_min(non_zero_x), center[0])
+              max_x = tf.where(tf.not_equal(tf.shape(non_zero_x)[0], 0), tf.reduce_max(non_zero_x), center[0])
+                  
+
+              min_y = tf.where(tf.not_equal(tf.shape(non_zero_y)[0], 0), tf.reduce_min(non_zero_y), center[1])
+              max_y = tf.where(tf.not_equal(tf.shape(non_zero_y)[0], 0), tf.reduce_max(non_zero_y), center[1])
+                  
+              non_zero_x_indices = []
+              non_zero_y_indices = []
+              
+              y_val = tf.cast(css, tf.int32) + (center[1] - center[0])
+              zero_value = tf.constant([0], dtype=tf.int32)
+              y_indices = tf.where(tf.logical_and(tf.greater_equal(y_val, zero_value), tf.less(y_val, tf.shape(mask)[0])))
+              y_val_reduced = tf.gather(y_val, y_indices)
+              x_val_reduced = tf.gather(tf.cast(css, tf.int32), y_indices)
+              matrix3 = tf.squeeze(tf.stack([y_val_reduced,x_val_reduced], axis=2))
+              sub_mask = tf.where(tf.equal(tf.gather_nd(tf.cast(mask, tf.int32), matrix3), one_value))
+              sub_mask = tf.reshape(sub_mask, (-1,))
+              
+              non_zero_x_indices = tf.gather(x_val_reduced, sub_mask)
+              non_zero_y_indices = tf.gather(y_val_reduced, sub_mask)
+              def true_fn_2():
+                  new_min_x = tf.gather(non_zero_x_indices, tf.argmin(non_zero_x_indices))[0][0]
+                  new_min_y = tf.gather(non_zero_y_indices, tf.argmin(non_zero_x_indices))[0][0]
+                  new_max_x = tf.gather(non_zero_x_indices, tf.argmax(non_zero_x_indices))[0][0]
+                  new_max_y = tf.gather(non_zero_y_indices, tf.argmax(non_zero_x_indices))[0][0]
+                  return new_min_x, new_min_y, new_max_x, new_max_y
+              
+              def false_fn_2():
+                  new_min_x = center[0]# CHECK THESE PLEASE 
+                  new_min_y = center[1]# CHECK THESE PLEASE
+                  new_max_x = center[0]# CHECK THESE PLEASE
+                  new_max_y = center[1]# CHECK THESE PLEASE
+                  return new_min_x, new_min_y, new_max_x, new_max_y
+                  
+              min_val_x, min_val_y, max_val_x, max_val_y = tf.cond(tf.not_equal(tf.shape(sub_mask)[0], 0), true_fn_2, false_fn_2)
+              
+              non_zero_x_indices_anti = []
+              non_zero_y_indices_anti = []
+              
+              y_val = -tf.cast(css, tf.int32) + (center[1] + center[0])
+              zero_value = tf.constant([0], dtype=tf.int32)
+              y_indices = tf.where(tf.logical_and(tf.greater_equal(y_val, zero_value), tf.less(y_val, tf.shape(mask)[0])))
+              y_val_reduced = tf.gather(y_val, y_indices)
+              x_val_reduced = tf.gather(tf.cast(css, tf.int32), y_indices)
+              matrix3 = tf.squeeze(tf.stack([y_val_reduced,x_val_reduced], axis=2))
+              sub_mask = tf.where(tf.equal(tf.gather_nd(tf.cast(mask, tf.int32), matrix3), one_value))
+              sub_mask = tf.reshape(sub_mask, (-1,))
+              
+              non_zero_x_indices_anti = tf.gather(x_val_reduced, sub_mask)
+              non_zero_y_indices_anti = tf.gather(y_val_reduced, sub_mask)
+              
+              def true_fn_3():
+                  new_min_x = tf.gather(non_zero_x_indices_anti, tf.argmin(non_zero_x_indices_anti))[0][0]
+                  new_min_y = tf.gather(non_zero_y_indices_anti, tf.argmin(non_zero_x_indices_anti))[0][0]
+                  new_max_x = tf.gather(non_zero_x_indices_anti, tf.argmax(non_zero_x_indices_anti))[0][0]
+                  new_max_y = tf.gather(non_zero_y_indices_anti, tf.argmax(non_zero_x_indices_anti))[0][0]
+                  return new_min_x, new_min_y, new_max_x, new_max_y
+              
+              def false_fn_3():
+                  new_min_x = center[0]# CHECK THESE PLEASE
+                  new_min_y = center[1]# CHECK THESE PLEASE
+                  new_max_x = center[0]# CHECK THESE PLEASE
+                  new_max_y = center[1]# CHECK THESE PLEASE
+                  return new_min_x, new_min_y, new_max_x, new_max_y
+                  
+              min_val_x_anti, min_val_y_anti, max_val_x_anti, max_val_y_anti = tf.cond(tf.not_equal(tf.shape(sub_mask)[0], 0), true_fn_3, false_fn_3)
+              points.extend([(tf.cast(max_x, tf.float32)/width, tf.cast(center[1], tf.float32)/height), (tf.cast(max_val_x_anti, tf.float32)/width, tf.cast(max_val_y_anti, tf.float32)/height), (tf.cast(center[0], tf.float32)/width, tf.cast(min_y, tf.float32)/height), (tf.cast(min_val_x, tf.float32)/width, tf.cast(min_val_y, tf.float32)/height), (tf.cast(min_x, tf.float32)/width, tf.cast(center[1], tf.float32)/height), (tf.cast(min_val_x_anti, tf.float32)/width, tf.cast(min_val_y_anti, tf.float32)/height), (tf.cast(center[0], tf.float32)/width, tf.cast(max_y, tf.float32)/height), (tf.cast(max_val_x, tf.float32)/width, tf.cast(max_val_y, tf.float32)/height)])
+
+              multiply2 = tf.shape(points)
+              matrix = tf.tile(points2, [multiply2[0],1])
+              diff = tf.norm(tf.cast(points-matrix, tf.float32), ord='euclidean', axis=1)
+              points.insert(0, center)
+              center = tf.cast(center, tf.float32)
+              diff = tf.concat([[center[0]/width], diff], axis=0)# CHECK THESE PLEASE
+              diff = tf.concat([[center[1]/height], diff], axis=0)# CHECK THESE PLEASE
+              diff = tf.stack(diff)
+              diff = tf.reshape(diff, (1, tf.shape(diff)[0],1))
+
+              return [diff], mask
+      
+      # Under the assumption that all masks are non zero
+      # def condition(i, masks, indices, vectorized_masks, mask_db):
+      #     vals, _ = tf.unique(masks[:,0])
+      #     # vals = tf.Print(vals, [vals], "None zero indices")
+      #     return tf.less(i, tf.cast(tf.reduce_max(vals)+1, tf.int32))
+
+      # Changing because some masks are zero's and we need to run across all the
+      # Masks (matched or unmatched)
+      def condition(i, masks, indices, vectorized_masks, mask_db):
+          shape_temp = tf.shape(mask_db)
+          return tf.less(i, shape_temp[0])
+              
+      def body(i, masks, indices, vectorized_masks, mask_db):
+          vals, _ = tf.unique(masks[:,0])
+          value = tf.cast(tf.where(tf.equal(tf.cast(masks[:,0], tf.int32), i)), tf.int32)
+          value = tf.reshape(value, (1,-1))
+          def non_zero_mask_vectorization():
+            mask = mask_db[i]
+            vectorized_mask1, _ = mask_vectorize(value, masks, 8, i, mask)
+            return vectorized_mask1
+          def zero_mask_vectorization():
+            vectorized_mask1 = tf.zeros([1,10,1], dtype=tf.float32)
+            return vectorized_mask1
+
+          i_reshaped = tf.reshape(i, [1])
+          vals = tf.cast(vals, tf.int32)
+          a = tf.setdiff1d(vals, i_reshaped)
+          b = tf.setdiff1d(vals,a[0])
+          check_val = tf.size(b)
+          vectorized_mask = tf.cond(tf.equal(check_val, 0), zero_mask_vectorization, non_zero_mask_vectorization)
+          shapex = tf.shape(vectorized_mask)
+          check = tf.equal(shapex[0], 1)
+          assert_op = tf.Assert(check, [vectorized_mask])
+          with tf.control_dependencies([assert_op]):
+            vectorized_masks = tf.concat([vectorized_masks, vectorized_mask], 0)
+          return [tf.add(i, 1), masks, value, vectorized_masks, mask_db]
+
+      i = tf.constant(0, dtype=tf.int32)
+      indices = tf.zeros([1,0], dtype=tf.int32)
+      non_zero_x = tf.zeros([1,0], dtype=tf.int32)
+      shape2 = tf.constant([0], dtype=tf.int32)
+      shape3 = tf.constant([0], dtype=tf.int32)
+      vectorized_masks = tf.zeros([0,10,1], dtype=tf.float32)
+      i, _, indices, vectorized_masks, m = tf.while_loop(condition,body,[i, cols, indices, vectorized_masks, m], shape_invariants=[i.get_shape(), cols.get_shape(), tf.TensorShape([1, None]), tf.TensorShape([None, 10, 1]), m.get_shape()])
+      return indices, vectorized_masks, i, _
+
     if groundtruth_boxes.has_field(fields.BoxListFields.masks):
       masks = groundtruth_boxes.get_field(
           fields.BoxListFields.masks)
-      indices, vectorized_masks, i, _ = process_masks(masks)
-      ycenter = vectorized_masks[:,2,0]
-      xcenter = vectorized_masks[:,3,0]
-      ymax = vectorized_masks[:,0,0]
-      xmax = vectorized_masks[:,1,0]
-      o1 = vectorized_masks[:,4,0]
-      o2 = vectorized_masks[:,5,0]
-      o3 = vectorized_masks[:,7,0]
 
-    # if groundtruth_boxes.has_field(fields.BoxListFields.center_x):
+      # Code for the other process mask with center offset vectorization
+      # Code for center offset vectorization (TODO: ARUN genearalize)
+
+      #indices, vectorized_masks, i, _ = process_masks(masks)
+      #ycenter = vectorized_masks[:,2,0]
+      #xcenter = vectorized_masks[:,3,0]
+      #ymax = vectorized_masks[:,0,0]
+      #xmax = vectorized_masks[:,1,0]
+      #o1 = vectorized_masks[:,4,0]
+      #o2 = vectorized_masks[:,5,0]
+      #o3 = vectorized_masks[:,7,0]
+
+      # Code for 8 point mask extraction
+      indices, vectorized_masks, i, _ = process_masks_full(masks)
+      ycenter = vectorized_masks[:,0,0]
+      xcenter = vectorized_masks[:,1,0]
+      o1 = vectorized_masks[:,2,0]
+      o2 = vectorized_masks[:,3,0]
+      o3 = vectorized_masks[:,4,0]
+      o4 = vectorized_masks[:,5,0]
+      o5 = vectorized_masks[:,6,0]
+      o6 = vectorized_masks[:,7,0]
+      o7 = vectorized_masks[:,8,0]
+      o8 = vectorized_masks[:,9,0]
+
+
       x = xcenter
       general_unmatched_value = tf.zeros(x.get_shape()[1:])
       matched_x = match.gather_based_on_match(
@@ -394,7 +607,6 @@ class TargetAssigner(object):
       matched_gt_boxlist.add_field(fields.BoxListFields.center_x,
                                    matched_x)
 
-    # if groundtruth_boxes.has_field(fields.BoxListFields.center_y):
       y = ycenter
       matched_y = match.gather_based_on_match(
         y,
@@ -404,21 +616,21 @@ class TargetAssigner(object):
       matched_gt_boxlist.add_field(fields.BoxListFields.center_y,
                                    matched_y)
 
-    # if groundtruth_boxes.has_field(fields.BoxListFields.height):
-      matched_ymax = match.gather_based_on_match(
-        ymax,
-        unmatched_value=general_unmatched_value,
-        ignored_value=general_unmatched_value)
-      matched_gt_boxlist.add_field(fields.BoxListFields.ymax,
-                                   matched_ymax)
+      # Code for center offset vectorization (TODO: ARUN genearalize)
 
-    # if groundtruth_boxes.has_field(fields.BoxListFields.width):
-      matched_xmax = match.gather_based_on_match(
-        xmax,
-        unmatched_value=general_unmatched_value,
-        ignored_value=general_unmatched_value)
-      matched_gt_boxlist.add_field(fields.BoxListFields.xmax,
-                                   matched_xmax)
+      #matched_ymax = match.gather_based_on_match(
+      #   ymax,
+      #   unmatched_value=general_unmatched_value,
+      #   ignored_value=general_unmatched_value)
+      #matched_gt_boxlist.add_field(fields.BoxListFields.ymax,
+      #                              matched_ymax)
+
+      #matched_xmax = match.gather_based_on_match(
+      #   xmax,
+      #   unmatched_value=general_unmatched_value,
+      #   ignored_value=general_unmatched_value)
+      #matched_gt_boxlist.add_field(fields.BoxListFields.xmax,
+      #                              matched_xmax)
 
       matched_o1 = match.gather_based_on_match(
         o1,
@@ -440,6 +652,41 @@ class TargetAssigner(object):
         ignored_value=general_unmatched_value)
       matched_gt_boxlist.add_field(fields.BoxListFields.o3,
                                    matched_o3)
+
+      matched_o4 = match.gather_based_on_match(
+        o4,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o4,
+                                   matched_o4)
+
+      matched_o5 = match.gather_based_on_match(
+        o5,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o5,
+                                   matched_o5)
+
+      matched_o6 = match.gather_based_on_match(
+        o6,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o6,
+                                   matched_o6)
+
+      matched_o7 = match.gather_based_on_match(
+        o7,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o7,
+                                   matched_o7)
+
+      matched_o8 = match.gather_based_on_match(
+        o8,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.o8,
+                                   matched_o8)
 
     matched_reg_targets = self._box_coder.encode(matched_gt_boxlist, anchors)
     match_results_shape = shape_utils.combined_static_and_dynamic_shape(

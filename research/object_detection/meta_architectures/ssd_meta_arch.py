@@ -617,6 +617,20 @@ class SSDMetaArch(model.DetectionModel):
             feature_map) for feature_map in feature_maps
     ]
     return [(shape[1], shape[2]) for shape in feature_map_shapes]
+  
+  def _get_bounding_box(self, mask_vectorized):
+    y1, x1, y2, x2, y3, x3, y4, x4, y5, x5, y6, x6, y7, x7, y8, x8 = tf.unstack(tf.transpose(mask_vectorized))
+    y_vals = tf.transpose(tf.stack([y1, y2, y3, y4, y5, y6, y7, y8]))
+    x_vals = tf.transpose(tf.stack([x1, x2, x3, x4, x5, x6, x7, x8]))
+    #x1, y1, x2, y2, x3, y3, x4, y4 = tf.unstack(tf.transpose(mask_vectorized))
+    #y_vals = tf.transpose(tf.stack([y1, y2, y3, y4]))
+    #x_vals = tf.transpose(tf.stack([x1, x2, x3, x4]))
+    y_mins = tf.transpose(tf.squeeze(tf.reduce_min(y_vals, axis=3, keep_dims=True), axis=3))
+    x_mins = tf.transpose(tf.squeeze(tf.reduce_min(x_vals, axis=3, keep_dims=True), axis=3))
+    y_maxs = tf.transpose(tf.squeeze(tf.reduce_max(y_vals, axis=3, keep_dims=True), axis=3))
+    x_maxs = tf.transpose(tf.squeeze(tf.reduce_max(x_vals, axis=3, keep_dims=True), axis=3))
+    bboxs = tf.transpose(tf.stack([y_mins, x_mins, y_maxs, x_maxs]))
+    return bboxs
 
   def postprocess(self, prediction_dict, true_image_shapes):
     """Converts prediction tensors to final detections.
@@ -688,8 +702,11 @@ class SSDMetaArch(model.DetectionModel):
           prediction_dict['class_predictions_with_background'])
       detection_boxes, detection_keypoints = self._batch_decode(
           box_encodings, prediction_dict['anchors'])
+      
+      detection_boxes = tf.expand_dims(detection_boxes, axis=2) #Moved up and commented same line down
+      detection_boxes = self._get_bounding_box(detection_boxes)
       detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
-      detection_boxes = tf.expand_dims(detection_boxes, axis=2)
+      #detection_boxes = tf.expand_dims(detection_boxes, axis=2)
 
       detection_scores_with_background = self._score_conversion_fn(
           class_predictions_with_background)
@@ -715,24 +732,24 @@ class SSDMetaArch(model.DetectionModel):
         detection_keypoints = tf.identity(
             detection_keypoints, 'raw_keypoint_locations')
         additional_fields[fields.BoxListFields.keypoints] = detection_keypoints
-      # (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks,
-      #  nmsed_additional_fields, num_detections) = self._non_max_suppression_fn(
-      #      detection_boxes,
-      #      detection_scores,
-      #      clip_window=self._compute_clip_window(preprocessed_images,
-      #                                            true_image_shapes),
-      #      additional_fields=additional_fields,
-      #      masks=prediction_dict.get('mask_predictions'))
-      num_detections = [70]*batch_size
+      (nmsed_boxes, nmsed_scores, nmsed_classes, nmsed_masks,
+       nmsed_additional_fields, num_detections) = self._non_max_suppression_fn(
+           detection_boxes,
+           detection_scores,
+           clip_window=self._compute_clip_window(preprocessed_images,
+                                                 true_image_shapes),
+           additional_fields=additional_fields,
+           masks=prediction_dict.get('mask_predictions'))
+      #num_detections = [70]*batch_size
       detection_dict = {
           fields.DetectionResultFields.detection_boxes:
-              detection_boxes,
+              nmsed_boxes,
           fields.DetectionResultFields.detection_scores:
-              detection_scores,
+              nmsed_scores,
           fields.DetectionResultFields.detection_classes:
-              class_predictions,
+              nmsed_classes,
           fields.DetectionResultFields.detection_multiclass_scores:
-              detection_scores_with_background,
+              nmsed_additional_fields['multiclass_scores'],
           fields.DetectionResultFields.num_detections:
               tf.cast(num_detections, dtype=tf.float32),
           fields.DetectionResultFields.raw_detection_boxes:
@@ -1140,8 +1157,15 @@ class SSDMetaArch(model.DetectionModel):
 
     if 'anchors' not in prediction_dict:
       prediction_dict['anchors'] = self.anchors.get()
+    combined_shape = shape_utils.combined_static_and_dynamic_shape(
+        prediction_dict['box_encodings'])
     decoded_boxes, _ = self._batch_decode(prediction_dict['box_encodings'],
                                           prediction_dict['anchors'])
+    decoded_boxes = tf.expand_dims(decoded_boxes, axis=2)
+    decoded_boxes = self._get_bounding_box(decoded_boxes)
+    decoded_boxes = tf.reshape(decoded_boxes, tf.stack(
+        [combined_shape[0], combined_shape[1], 4]))
+    
     decoded_box_tensors_list = tf.unstack(decoded_boxes)
     class_prediction_list = tf.unstack(class_predictions)
     decoded_boxlist_list = []
@@ -1189,7 +1213,7 @@ class SSDMetaArch(model.DetectionModel):
     #       decoded_keypoints,
     #       tf.stack([combined_shape[0], combined_shape[1], num_keypoints, 2]))
     decoded_boxes = tf.reshape(decoded_boxes, tf.stack(
-        [combined_shape[0], combined_shape[1], 8]))
+        [combined_shape[0], combined_shape[1], 16]))
     return decoded_boxes, decoded_keypoints
 
   def regularization_losses(self):

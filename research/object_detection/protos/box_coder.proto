@@ -7,6 +7,7 @@ import "object_detection/protos/keypoint_box_coder.proto";
 import "object_detection/protos/mean_stddev_box_coder.proto";
 import "object_detection/protos/square_box_coder.proto";
 import "object_detection/protos/center_offset_box_coder.proto";
+import "object_detection/protos/mask_vectorization_coder.proto";
 
 // Configuration proto for the box coder to be used in the object detection
 // pipeline. See core/box_coder.py for details.
@@ -17,5 +18,6 @@ message BoxCoder {
     SquareBoxCoder square_box_coder = 3;
     KeypointBoxCoder keypoint_box_coder = 4;
 	CenterOffsetBoxCoder center_offset_box_coder = 5;
+	MaskVectorizationCoder mask_vectorization_coder = 6;
   }
 }

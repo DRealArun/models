@@ -19,6 +19,7 @@ from object_detection.box_coders import keypoint_box_coder
 from object_detection.box_coders import mean_stddev_box_coder
 from object_detection.box_coders import square_box_coder
 from object_detection.box_coders import center_offset_box_coder
+from object_detection.box_coders import mask_vectorization_coder
 from object_detection.protos import box_coder_pb2
 
 
@@ -55,6 +56,20 @@ def build(box_coder_config):
         box_coder_config.center_offset_box_coder.o1_scale,
         box_coder_config.center_offset_box_coder.o2_scale, 
         box_coder_config.center_offset_box_coder.o3_scale,
+    ])
+
+  if box_coder_config.WhichOneof('box_coder_oneof') == 'mask_vectorization_coder':
+    return mask_vectorization_coder.MaskVectorizationCoder(scale_factors=[
+        box_coder_config.mask_vectorization_coder.y_scale,
+        box_coder_config.mask_vectorization_coder.x_scale,
+        box_coder_config.mask_vectorization_coder.o1_scale,
+        box_coder_config.mask_vectorization_coder.o2_scale, 
+        box_coder_config.mask_vectorization_coder.o3_scale,
+        box_coder_config.mask_vectorization_coder.o4_scale,
+        box_coder_config.mask_vectorization_coder.o5_scale, 
+        box_coder_config.mask_vectorization_coder.o6_scale,
+        box_coder_config.mask_vectorization_coder.o7_scale,
+        box_coder_config.mask_vectorization_coder.o8_scale,
     ])
 
   if box_coder_config.WhichOneof('box_coder_oneof') == 'keypoint_box_coder':

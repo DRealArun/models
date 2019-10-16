@@ -168,6 +168,11 @@ class BoxListFields(object):
   o1 = 'o1'
   o2 = 'o2'
   o3 = 'o3'
+  o4 = 'o4'
+  o5 = 'o5'
+  o6 = 'o6'
+  o7 = 'o7'
+  o8 = 'o8'
 
 
 class TfExampleFields(object):
