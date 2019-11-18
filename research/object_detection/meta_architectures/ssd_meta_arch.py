@@ -616,6 +616,17 @@ class SSDMetaArch(model.DetectionModel):
             feature_map) for feature_map in feature_maps
     ]
     return [(shape[1], shape[2]) for shape in feature_map_shapes]
+    
+  def _get_bounding_box(self, mask_vectorized):
+      y1, x1, y2, x2, y3, x3, y4, x4, y5, x5, y6, x6, y7, x7, y8, x8 = tf.unstack(tf.transpose(mask_vectorized))
+      y_vals = tf.transpose(tf.stack([y1, y2, y3, y4, y5, y6, y7, y8]))
+      x_vals = tf.transpose(tf.stack([x1, x2, x3, x4, x5, x6, x7, x8]))
+      y_mins = tf.transpose(tf.squeeze(tf.reduce_min(y_vals, axis=3, keep_dims=True), axis=3))
+      x_mins = tf.transpose(tf.squeeze(tf.reduce_min(x_vals, axis=3, keep_dims=True), axis=3))
+      y_maxs = tf.transpose(tf.squeeze(tf.reduce_max(y_vals, axis=3, keep_dims=True), axis=3))
+      x_maxs = tf.transpose(tf.squeeze(tf.reduce_max(x_vals, axis=3, keep_dims=True), axis=3))
+      bboxs = tf.transpose(tf.stack([y_mins, x_mins, y_maxs, x_maxs]))
+      return bboxs
 
   def postprocess(self, prediction_dict, true_image_shapes):
     """Converts prediction tensors to final detections.
@@ -686,8 +697,9 @@ class SSDMetaArch(model.DetectionModel):
           prediction_dict['class_predictions_with_background'])
       detection_boxes, detection_keypoints = self._batch_decode(
           box_encodings, prediction_dict['anchors'])
-      detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
       detection_boxes = tf.expand_dims(detection_boxes, axis=2)
+      detection_boxes = self._get_bounding_box(detection_boxes)
+      detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
 
       detection_scores_with_background = self._score_conversion_fn(
           class_predictions_with_background)
@@ -781,11 +793,14 @@ class SSDMetaArch(model.DetectionModel):
       confidences = None
       if self.groundtruth_has_field(fields.BoxListFields.confidences):
         confidences = self.groundtruth_lists(fields.BoxListFields.confidences)
+      groundtruth_masks_list = None
+      if self.groundtruth_has_field(fields.BoxListFields.masks):
+        groundtruth_masks_list = self.groundtruth_lists(fields.BoxListFields.masks)
       (batch_cls_targets, batch_cls_weights, batch_reg_targets,
        batch_reg_weights, batch_match) = self._assign_targets(
            self.groundtruth_lists(fields.BoxListFields.boxes),
            self.groundtruth_lists(fields.BoxListFields.classes),
-           keypoints, weights, confidences)
+           keypoints, weights, confidences, groundtruth_masks_list)
       match_list = [matcher.Match(match) for match in tf.unstack(batch_match)]
       if self._add_summaries:
         self._summarize_target_assignment(
@@ -942,7 +957,8 @@ class SSDMetaArch(model.DetectionModel):
                       groundtruth_classes_list,
                       groundtruth_keypoints_list=None,
                       groundtruth_weights_list=None,
-                      groundtruth_confidences_list=None):
+                      groundtruth_confidences_list=None,
+                      groundtruth_masks_list=None):
     """Assign groundtruth targets.
 
     Adds a background class to each one-hot encoding of groundtruth classes
@@ -999,6 +1015,20 @@ class SSDMetaArch(model.DetectionModel):
       for boxlist, keypoints in zip(
           groundtruth_boxlists, groundtruth_keypoints_list):
         boxlist.add_field(fields.BoxListFields.keypoints, keypoints)
+    if groundtruth_masks_list is not None:
+      resized_masks_list = []
+      for mask in groundtruth_masks_list:
+        _, resized_mask, _ = self._image_resizer_fn(
+            # Reuse the given `image_resizer_fn` to resize groundtruth masks.
+            # `mask` tensor for an image is of the shape [num_masks,
+            # image_height, image_width]. Below we create a dummy image of the
+            # the shape [image_height, image_width, 1] to use with
+            # `image_resizer_fn`.
+            image=tf.zeros(tf.stack([tf.shape(mask)[1],
+                                     tf.shape(mask)[2], 1])),
+            masks=mask)
+        resized_masks_list.append(resized_mask)
+      groundtruth_masks_list = resized_masks_list
     if train_using_confidences:
       return target_assigner.batch_assign_confidences(
           self._target_assigner,
@@ -1016,7 +1046,7 @@ class SSDMetaArch(model.DetectionModel):
           groundtruth_boxlists,
           groundtruth_classes_with_background_list,
           self._unmatched_class_label,
-          groundtruth_weights_list)
+          groundtruth_weights_list, groundtruth_masks_list)
 
   def _summarize_target_assignment(self, groundtruth_boxes_list, match_list):
     """Creates tensorflow summaries for the input boxes and anchors.
@@ -1113,8 +1143,14 @@ class SSDMetaArch(model.DetectionModel):
 
     if 'anchors' not in prediction_dict:
       prediction_dict['anchors'] = self.anchors.get()
+    combined_shape = shape_utils.combined_static_and_dynamic_shape(
+        prediction_dict['box_encodings'])
     decoded_boxes, _ = self._batch_decode(prediction_dict['box_encodings'],
                                           prediction_dict['anchors'])
+    decoded_boxes = tf.expand_dims(decoded_boxes, axis=2)
+    decoded_boxes = self._get_bounding_box(decoded_boxes)
+    decoded_boxes = tf.reshape(decoded_boxes, tf.stack(
+        [combined_shape[0], combined_shape[1], 4]))
     decoded_box_tensors_list = tf.unstack(decoded_boxes)
     class_prediction_list = tf.unstack(class_predictions)
     decoded_boxlist_list = []
@@ -1154,15 +1190,21 @@ class SSDMetaArch(model.DetectionModel):
         tf.reshape(box_encodings, [-1, self._box_coder.code_size]),
         tiled_anchors_boxlist)
     decoded_keypoints = None
-    if decoded_boxes.has_field(fields.BoxListFields.keypoints):
+    if isinstance(decoded_boxes, box_list.BoxList) and \
+    decoded_boxes.has_field(fields.BoxListFields.keypoints):
       decoded_keypoints = decoded_boxes.get_field(
           fields.BoxListFields.keypoints)
       num_keypoints = decoded_keypoints.get_shape()[1]
       decoded_keypoints = tf.reshape(
           decoded_keypoints,
           tf.stack([combined_shape[0], combined_shape[1], num_keypoints, 2]))
-    decoded_boxes = tf.reshape(decoded_boxes.get(), tf.stack(
-        [combined_shape[0], combined_shape[1], 4]))
+    decoded_code_size = 4
+    if self._box_coder.code_size >= 8:
+    	decoded_code_size = 2*self._box_coder.code_size
+    if isinstance(decoded_boxes, box_list.BoxList):
+    	decoded_boxes = decoded_boxes.get()
+    decoded_boxes = tf.reshape(decoded_boxes, tf.stack(
+        [combined_shape[0], combined_shape[1], decoded_code_size]))
     return decoded_boxes, decoded_keypoints
 
   def regularization_losses(self):

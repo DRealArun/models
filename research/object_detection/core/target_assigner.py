@@ -89,7 +89,8 @@ class TargetAssigner(object):
              groundtruth_boxes,
              groundtruth_labels=None,
              unmatched_class_label=None,
-             groundtruth_weights=None):
+             groundtruth_weights=None,
+             groundtruth_masks=None):
     """Assign classification and regression targets to each anchor.
 
     For a given set of anchors and groundtruth detections, match anchors
@@ -163,6 +164,13 @@ class TargetAssigner(object):
             groundtruth_labels)[:1],
         shape_utils.combined_static_and_dynamic_shape(
             groundtruth_boxes.get())[:1])
+    labels_and_mask_shapes_assert = tf.no_op()
+    if groundtruth_masks != None:
+      labels_and_mask_shapes_assert = shape_utils.assert_shape_equal(
+          shape_utils.combined_static_and_dynamic_shape(
+              groundtruth_labels)[:1],
+          shape_utils.combined_static_and_dynamic_shape(
+              groundtruth_masks)[:1])
 
     if groundtruth_weights is None:
       num_gt_boxes = groundtruth_boxes.num_boxes_static()
@@ -173,9 +181,10 @@ class TargetAssigner(object):
     # set scores on the gt boxes
     scores = 1 - groundtruth_labels[:, 0]
     groundtruth_boxes.add_field(fields.BoxListFields.scores, scores)
+    groundtruth_boxes.add_field(fields.BoxListFields.masks, groundtruth_masks)
 
     with tf.control_dependencies(
-        [unmatched_shape_assert, labels_and_box_shapes_assert]):
+        [unmatched_shape_assert, labels_and_box_shapes_assert, labels_and_mask_shapes_assert]):
       match_quality_matrix = self._similarity_calc.compare(groundtruth_boxes,
                                                            anchors)
       match = self._matcher.match(match_quality_matrix,
@@ -251,6 +260,17 @@ class TargetAssigner(object):
           ignored_value=tf.zeros(groundtruth_keypoints.get_shape()[1:]))
       matched_gt_boxlist.add_field(fields.BoxListFields.keypoints,
                                    matched_keypoints)
+    if groundtruth_boxes.has_field(fields.BoxListFields.masks):
+      masks = groundtruth_boxes.get_field(
+          fields.BoxListFields.masks)
+      general_unmatched_value = tf.zeros(tf.shape(masks)[1:])
+      matched_masks = match.gather_based_on_match(
+        masks,
+        unmatched_value=general_unmatched_value,
+        ignored_value=general_unmatched_value)
+      matched_gt_boxlist.add_field(fields.BoxListFields.masks,
+                                   matched_masks)
+
     matched_reg_targets = self._box_coder.encode(matched_gt_boxlist, anchors)
     match_results_shape = shape_utils.combined_static_and_dynamic_shape(
         match.match_results)
@@ -426,7 +446,8 @@ def batch_assign(target_assigner,
                  gt_box_batch,
                  gt_class_targets_batch,
                  unmatched_class_label=None,
-                 gt_weights_batch=None):
+                 gt_weights_batch=None,
+                 gt_mask_batch=None):
   """Batched assignment of classification and regression targets.
 
   Args:
@@ -486,16 +507,30 @@ def batch_assign(target_assigner,
   match_list = []
   if gt_weights_batch is None:
     gt_weights_batch = [None] * len(gt_class_targets_batch)
-  for anchors, gt_boxes, gt_class_targets, gt_weights in zip(
-      anchors_batch, gt_box_batch, gt_class_targets_batch, gt_weights_batch):
-    (cls_targets, cls_weights,
-     reg_targets, reg_weights, match) = target_assigner.assign(
-         anchors, gt_boxes, gt_class_targets, unmatched_class_label, gt_weights)
-    cls_targets_list.append(cls_targets)
-    cls_weights_list.append(cls_weights)
-    reg_targets_list.append(reg_targets)
-    reg_weights_list.append(reg_weights)
-    match_list.append(match)
+  if gt_mask_batch == None:
+    for anchors, gt_boxes, gt_class_targets, gt_weights in zip(
+        anchors_batch, gt_box_batch, gt_class_targets_batch, gt_weights_batch):
+      (cls_targets, cls_weights,
+       reg_targets, reg_weights, match) = target_assigner.assign(
+           anchors, gt_boxes, gt_class_targets, unmatched_class_label, gt_weights)
+      cls_targets_list.append(cls_targets)
+      cls_weights_list.append(cls_weights)
+      reg_targets_list.append(reg_targets)
+      reg_weights_list.append(reg_weights)
+      match_list.append(match)
+  else:
+    for anchors, gt_boxes, gt_class_targets, gt_weights, gt_masks in zip(
+        anchors_batch, gt_box_batch, gt_class_targets_batch, gt_weights_batch, 
+        gt_mask_batch):
+      (cls_targets, cls_weights,
+       reg_targets, reg_weights, match) = target_assigner.assign(
+           anchors, gt_boxes, gt_class_targets, unmatched_class_label, gt_weights, gt_masks)
+      cls_targets_list.append(cls_targets)
+      cls_weights_list.append(cls_weights)
+      reg_targets_list.append(reg_targets)
+      reg_weights_list.append(reg_weights)
+      match_list.append(match)
+
   batch_cls_targets = tf.stack(cls_targets_list)
   batch_cls_weights = tf.stack(cls_weights_list)
   batch_reg_targets = tf.stack(reg_targets_list)
