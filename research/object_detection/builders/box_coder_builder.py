@@ -18,6 +18,7 @@ from object_detection.box_coders import faster_rcnn_box_coder
 from object_detection.box_coders import keypoint_box_coder
 from object_detection.box_coders import mean_stddev_box_coder
 from object_detection.box_coders import square_box_coder
+from object_detection.box_coders import mask_8_point_vectorization_coder
 from object_detection.protos import box_coder_pb2
 
 
@@ -62,5 +63,16 @@ def build(box_coder_config):
         box_coder_config.square_box_coder.y_scale,
         box_coder_config.square_box_coder.x_scale,
         box_coder_config.square_box_coder.length_scale
+    ])
+  if box_coder_config.WhichOneof('box_coder_oneof') == 'mask_8_point_vectorization_coder':
+    return mask_8_point_vectorization_coder.Mask8PointVectorizationCoder(scale_factors=[
+        box_coder_config.mask_8_point_vectorization_coder.y_scale,
+        box_coder_config.mask_8_point_vectorization_coder.x_scale,
+        box_coder_config.mask_8_point_vectorization_coder.height_scale,
+        box_coder_config.mask_8_point_vectorization_coder.width_scale, 
+        box_coder_config.mask_8_point_vectorization_coder.offset1_scale,
+        box_coder_config.mask_8_point_vectorization_coder.offset2_scale,
+        box_coder_config.mask_8_point_vectorization_coder.offset3_scale, 
+        box_coder_config.mask_8_point_vectorization_coder.offset4_scale,
     ])
   raise ValueError('Empty box coder.')
